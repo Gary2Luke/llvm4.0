@@ -93,13 +93,14 @@ bool StackProtector::runOnFunction(Function &Fn) {
   HasPrologue = false;
   HasIRCheck = false;
 
-  Attribute Attr = Fn.getFnAttribute("stack-protector-buffer-size");
-  if (Attr.isStringAttribute() &&
-      Attr.getValueAsString().getAsInteger(10, SSPBufferSize))
-    return false; // Invalid integer string
 
-  if (!RequiresStackProtector())
-    return false;
+  //Attribute Attr = Fn.getFnAttribute("stack-protector-buffer-size");
+  //if (Attr.isStringAttribute() &&
+  //    Attr.getValueAsString().getAsInteger(10, SSPBufferSize))
+  //  return ChangeMain; // Invalid integer string
+
+  //if (!RequiresStackProtector())
+  //  return ChangeMain;
 
   // TODO(etienneb): Functions with funclets are not correctly supported now.
   // Do nothing if this is funclet-based personality.
@@ -311,15 +312,46 @@ static Value *getStackGuard(const TargetLoweringBase *TLI, Module *M,
 /// Returns true if the platform/triple supports the stackprotectorcreate pseudo
 /// node.
 static bool CreatePrologue(Function *F, Module *M, ReturnInst *RI,
-                           const TargetLoweringBase *TLI, AllocaInst *&AI) {
+                           const TargetLoweringBase *TLI, AllocaInst *&AI, bool HadRet) {
   bool SupportsSelectionDAGSP = false;
   IRBuilder<> B(&F->getEntryBlock().front());
-  PointerType *PtrTy = Type::getInt8PtrTy(RI->getContext());
-  AI = B.CreateAlloca(PtrTy, nullptr, "StackGuardSlot");
+  LLVMContext &Context = F->getContext();
+  if (F->getName().equals("main")){
+    BasicBlock *FBB = &F->getEntryBlock();
+    Instruction *First = FBB->getFirstNonPHIOrDbgOrLifetime();
+    Type * ITy = Type::getInt64Ty(Context);
+    Type * Ty = Type::getInt64PtrTy(Context);
+    Constant* AllocSize = ConstantInt::get(ITy,0x1000);
+    Instruction* Malloc=CallInst::CreateMalloc(First,ITy,Ty,AllocSize, nullptr, nullptr,"");
 
-  Value *GuardSlot = getStackGuard(TLI, M, B, &SupportsSelectionDAGSP);
-  B.CreateCall(Intrinsic::getDeclaration(M, Intrinsic::stackprotector),
-               {GuardSlot, AI});
+    StringRef AsmInit = "mov $0, %fs:0x28";
+    StringRef ConInit = "r";
+    FunctionType* FtInit = FunctionType::get(Type::getVoidTy(Context),{Type::getInt8PtrTy(Context)}, false);
+    InlineAsm* Init = InlineAsm::get(FtInit, AsmInit, ConInit, false, false, InlineAsm::AD_ATT);
+    Value *Pointer = B.CreateTruncOrBitCast(Malloc, Type::getInt8PtrTy(Context))  ;
+    B.CreateCall(Init, {Pointer});
+  }
+  if(HadRet){
+	  Value *RetAddr = B.CreateCall(Intrinsic::getDeclaration(M, Intrinsic::returnaddress),B.getInt32(0), "");
+	  
+	  Value* StackPointer = ConstantExpr::getIntToPtr(
+		ConstantInt::get(Type::getInt32Ty(B.getContext()), 0x28),
+		Type::getInt8PtrTy(B.getContext())->getPointerTo(257)
+	  );
+	  
+  	  Type *Int8PtrPtrTy = Type::getInt8PtrTy(Context)->getPointerTo();
+	  Value* loadedStackPointer = B.CreateLoad(StackPointer, true, "");
+	  Value *loadedStackPointer22 = B.CreateBitCast(loadedStackPointer, Int8PtrPtrTy);
+	  B.CreateStore(RetAddr, loadedStackPointer22, true);
+	  
+	  StringRef AsmStore = "addq $$0x8, %fs:0x28\n\t";// this stack grows up
+	  StringRef ConStore = "";
+	  FunctionType* FtStore = FunctionType::get(Type::getVoidTy(Context),{}, false);
+	  InlineAsm* Store = InlineAsm::get(FtStore, AsmStore, ConStore, false, false, InlineAsm::AD_ATT);
+	  B.CreateCall(Store, {});
+  }
+
+  assert(SupportsSelectionDAGSP==0 && "Wrong Vaule");
   return SupportsSelectionDAGSP;
 }
 
@@ -337,13 +369,20 @@ bool StackProtector::InsertStackProtectors() {
   for (Function::iterator I = F->begin(), E = F->end(); I != E;) {
     BasicBlock *BB = &*I++;
     ReturnInst *RI = dyn_cast<ReturnInst>(BB->getTerminator());
-    if (!RI)
+    if (!RI && !(I == E && F->getName().equals("main")) )
       continue;
 
     // Generate prologue instrumentation if not already generated.
     if (!HasPrologue) {
       HasPrologue = true;
-      SupportsSelectionDAGSP &= CreatePrologue(F, M, RI, TLI, AI);
+      //SupportsSelectionDAGSP &= CreatePrologue(F, M, RI, TLI, AI);
+      if(RI)
+      	SupportsSelectionDAGSP = CreatePrologue(F, M, RI, TLI, AI, true);
+      else{
+	SupportsSelectionDAGSP = CreatePrologue(F, M, RI, TLI, AI, false);
+	return false;
+		
+	}
     }
 
     // SelectionDAG based code generation. Nothing else needs to be done here.
@@ -362,6 +401,7 @@ bool StackProtector::InsertStackProtectors() {
     if (Value* GuardCheck = TLI->getSSPStackGuardCheck(*M)) {
       // Generate the function-based epilogue instrumentation.
       // The target provides a guard check function, generate a call to it.
+      assert(0 && "You shall not pass!");
       IRBuilder<> B(RI);
       LoadInst *Guard = B.CreateLoad(AI, true, "Guard");
       CallInst *Call = B.CreateCall(GuardCheck, {Guard});
@@ -418,9 +458,37 @@ bool StackProtector::InsertStackProtectors() {
 
       // Generate the stack protector instructions in the old basic block.
       IRBuilder<> B(BB);
-      Value *Guard = getStackGuard(TLI, M, B);
-      LoadInst *LI2 = B.CreateLoad(AI, true);
-      Value *Cmp = B.CreateICmpEQ(Guard, LI2);
+      // epilogue
+      //errs().write_escaped(F->getName()) << '\n';
+
+      LLVMContext &Context = F->getContext();
+      Value *RetAddr = B.CreateCall(Intrinsic::getDeclaration(M, Intrinsic::returnaddress),B.getInt32(0), "");
+      Value* StackPointer = ConstantExpr::getIntToPtr(
+	ConstantInt::get(Type::getInt32Ty(B.getContext()), 0x28),
+	Type::getInt8PtrTy(B.getContext())->getPointerTo(257)
+      );
+      Type *Int8PtrPtrTy = Type::getInt8PtrTy(Context)->getPointerTo();
+	//Value *const222 = B.getInt64(0x8);
+
+      StringRef AsmRead = "subq $$0x8, %fs:0x28\n\t";// this stack grows up
+      StringRef ConRead = "";
+      FunctionType* FtRead = FunctionType::get(Type::getVoidTy(Context),{}, false);
+      InlineAsm* Read = InlineAsm::get(FtRead, AsmRead, ConRead, true, false, InlineAsm::AD_ATT);
+      B.CreateCall(Read);
+  
+      
+      Value* loadedStackPointer = B.CreateLoad(StackPointer, true, "");
+      Value *loadedStackPointer22 = B.CreateBitCast(loadedStackPointer, Int8PtrPtrTy);
+      Value *RightAddr = B.CreateLoad(loadedStackPointer22, true, "");      
+      Value *Cmp = B.CreateICmpEQ(RightAddr, RetAddr);
+/*
+      StringRef AsmRead = "subq $$0x8, %fs:0x40\n\t";// this stack grows up
+      StringRef ConRead = "";
+      FunctionType* FtRead = FunctionType::get(Type::getVoidTy(Context),{}, false);
+      InlineAsm* Read = InlineAsm::get(FtRead, AsmRead, ConRead, false, false, InlineAsm::AD_ATT);
+      B.CreateCall(Read, {});
+*/
+   
       auto SuccessProb =
           BranchProbabilityInfo::getBranchProbStackProtector(true);
       auto FailureProb =
