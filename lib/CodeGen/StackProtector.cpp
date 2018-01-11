@@ -324,7 +324,7 @@ static bool CreatePrologue(Function *F, Module *M, ReturnInst *RI,
     Constant* AllocSize = ConstantInt::get(ITy,0x1000);
     Instruction* Malloc=CallInst::CreateMalloc(First,ITy,Ty,AllocSize, nullptr, nullptr,"");
 
-    StringRef AsmInit = "mov $0, %fs:0x28";
+    StringRef AsmInit = "mov $0, %r15";
     StringRef ConInit = "r";
     FunctionType* FtInit = FunctionType::get(Type::getVoidTy(Context),{Type::getInt8PtrTy(Context)}, false);
     InlineAsm* Init = InlineAsm::get(FtInit, AsmInit, ConInit, false, false, InlineAsm::AD_ATT);
@@ -332,23 +332,12 @@ static bool CreatePrologue(Function *F, Module *M, ReturnInst *RI,
     B.CreateCall(Init, {Pointer});
   }
   if(HadRet){
-	  Value *RetAddr = B.CreateCall(Intrinsic::getDeclaration(M, Intrinsic::returnaddress),B.getInt32(0), "");
-	  
-	  Value* StackPointer = ConstantExpr::getIntToPtr(
-		ConstantInt::get(Type::getInt32Ty(B.getContext()), 0x28),
-		Type::getInt8PtrTy(B.getContext())->getPointerTo(257)
-	  );
-	  
-  	  Type *Int8PtrPtrTy = Type::getInt8PtrTy(Context)->getPointerTo();
-	  Value* loadedStackPointer = B.CreateLoad(StackPointer, true, "");
-	  Value *loadedStackPointer22 = B.CreateBitCast(loadedStackPointer, Int8PtrPtrTy);
-	  B.CreateStore(RetAddr, loadedStackPointer22, true);
-	  
-	  StringRef AsmStore = "addq $$0x8, %fs:0x28\n\t";// this stack grows up
-	  StringRef ConStore = "";
-	  FunctionType* FtStore = FunctionType::get(Type::getVoidTy(Context),{}, false);
+	  Value *RetAddr = B.CreateCall(Intrinsic::getDeclaration(M, Intrinsic::returnaddress),B.getInt32(0), "");	  
+	  StringRef AsmStore = "mov $0, (%r15)\n\t add $$0x8, %r15\n\t";// this stack grows up
+	  StringRef ConStore = "r";
+	  FunctionType* FtStore = FunctionType::get(Type::getVoidTy(Context),{Type::getInt8PtrTy(Context)}, false);
 	  InlineAsm* Store = InlineAsm::get(FtStore, AsmStore, ConStore, false, false, InlineAsm::AD_ATT);
-	  B.CreateCall(Store, {});
+	  B.CreateCall(Store, {RetAddr});
   }
 
   assert(SupportsSelectionDAGSP==0 && "Wrong Vaule");
@@ -463,32 +452,16 @@ bool StackProtector::InsertStackProtectors() {
 
       LLVMContext &Context = F->getContext();
       Value *RetAddr = B.CreateCall(Intrinsic::getDeclaration(M, Intrinsic::returnaddress),B.getInt32(0), "");
-      Value* StackPointer = ConstantExpr::getIntToPtr(
-	ConstantInt::get(Type::getInt32Ty(B.getContext()), 0x28),
-	Type::getInt8PtrTy(B.getContext())->getPointerTo(257)
-      );
-      Type *Int8PtrPtrTy = Type::getInt8PtrTy(Context)->getPointerTo();
-	//Value *const222 = B.getInt64(0x8);
-
-      StringRef AsmRead = "subq $$0x8, %fs:0x28\n\t";// this stack grows up
-      StringRef ConRead = "";
-      FunctionType* FtRead = FunctionType::get(Type::getVoidTy(Context),{}, false);
-      InlineAsm* Read = InlineAsm::get(FtRead, AsmRead, ConRead, true, false, InlineAsm::AD_ATT);
-      B.CreateCall(Read);
-  
       
-      Value* loadedStackPointer = B.CreateLoad(StackPointer, true, "");
-      Value *loadedStackPointer22 = B.CreateBitCast(loadedStackPointer, Int8PtrPtrTy);
-      Value *RightAddr = B.CreateLoad(loadedStackPointer22, true, "");      
-      Value *Cmp = B.CreateICmpEQ(RightAddr, RetAddr);
-/*
-      StringRef AsmRead = "subq $$0x8, %fs:0x40\n\t";// this stack grows up
-      StringRef ConRead = "";
-      FunctionType* FtRead = FunctionType::get(Type::getVoidTy(Context),{}, false);
+
+      StringRef AsmRead = "sub $$0x8, %r15\n\t  mov (%r15), $0\n\t";// this stack drop down
+      StringRef ConRead = "=r";
+      FunctionType* FtRead = FunctionType::get(Type::getInt8PtrTy(Context),{}, false);
       InlineAsm* Read = InlineAsm::get(FtRead, AsmRead, ConRead, false, false, InlineAsm::AD_ATT);
-      B.CreateCall(Read, {});
-*/
-   
+      Value *RightAddr = B.CreateCall(Read);
+    
+      Value *Cmp = B.CreateICmpEQ(RightAddr, RetAddr);
+  
       auto SuccessProb =
           BranchProbabilityInfo::getBranchProbStackProtector(true);
       auto FailureProb =
