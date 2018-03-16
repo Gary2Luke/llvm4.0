@@ -324,7 +324,7 @@ static bool CreatePrologue(Function *F, Module *M, ReturnInst *RI,
     Constant* AllocSize = ConstantInt::get(ITy,0x1000);
     Instruction* Malloc=CallInst::CreateMalloc(First,ITy,Ty,AllocSize, nullptr, nullptr,"");
 
-    StringRef AsmInit = "mov $0, %r15";
+    StringRef AsmInit = "mov $0, %fs:0x28";
     StringRef ConInit = "r";
     FunctionType* FtInit = FunctionType::get(Type::getVoidTy(Context),{Type::getInt8PtrTy(Context)}, false);
     InlineAsm* Init = InlineAsm::get(FtInit, AsmInit, ConInit, false, false, InlineAsm::AD_ATT);
@@ -332,12 +332,24 @@ static bool CreatePrologue(Function *F, Module *M, ReturnInst *RI,
     B.CreateCall(Init, {Pointer});
   }
   if(HadRet){
-	  Value *RetAddr = B.CreateCall(Intrinsic::getDeclaration(M, Intrinsic::returnaddress),B.getInt32(0), "");	  
-	  StringRef AsmStore = "mov $0, (%r15)\n\t add $$0x8, %r15\n\t";// this stack grows up
-	  StringRef ConStore = "r";
-	  FunctionType* FtStore = FunctionType::get(Type::getVoidTy(Context),{Type::getInt8PtrTy(Context)}, false);
+
+	  Value *RetAddr = B.CreateCall(Intrinsic::getDeclaration(M, Intrinsic::returnaddress),B.getInt32(0), "");
+	  
+	  Value* StackPointer = ConstantExpr::getIntToPtr(
+		ConstantInt::get(Type::getInt32Ty(B.getContext()), 0x28),
+		Type::getInt8PtrTy(B.getContext())->getPointerTo(257)
+	  );
+	  
+  	  Type *Int8PtrPtrTy = Type::getInt8PtrTy(Context)->getPointerTo();
+	  Value* loadedStackPointer = B.CreateLoad(StackPointer, true, "");
+	  Value *loadedStackPointer22 = B.CreateBitCast(loadedStackPointer, Int8PtrPtrTy);
+	  B.CreateStore(RetAddr, loadedStackPointer22, true);
+	  
+	  StringRef AsmStore = "addq $$0x8, %fs:0x28\n\t";// this stack grows up
+	  StringRef ConStore = "";
+	  FunctionType* FtStore = FunctionType::get(Type::getVoidTy(Context),{}, false);
 	  InlineAsm* Store = InlineAsm::get(FtStore, AsmStore, ConStore, false, false, InlineAsm::AD_ATT);
-	  B.CreateCall(Store, {RetAddr});
+	  B.CreateCall(Store, {});
   }
 
   assert(SupportsSelectionDAGSP==0 && "Wrong Vaule");
@@ -451,17 +463,38 @@ bool StackProtector::InsertStackProtectors() {
       //errs().write_escaped(F->getName()) << '\n';
 
       LLVMContext &Context = F->getContext();
-      Value *RetAddr = B.CreateCall(Intrinsic::getDeclaration(M, Intrinsic::returnaddress),B.getInt32(0), "");
       
-
-      StringRef AsmRead = "sub $$0x8, %r15\n\t  mov (%r15), $0\n\t";// this stack drop down
-      StringRef ConRead = "=r";
-      FunctionType* FtRead = FunctionType::get(Type::getInt8PtrTy(Context),{}, false);
-      InlineAsm* Read = InlineAsm::get(FtRead, AsmRead, ConRead, false, false, InlineAsm::AD_ATT);
-      Value *RightAddr = B.CreateCall(Read);
-    
-      Value *Cmp = B.CreateICmpEQ(RightAddr, RetAddr);
+      Value* StackPointer = ConstantExpr::getIntToPtr(
+	ConstantInt::get(Type::getInt32Ty(B.getContext()), 0x28),
+	Type::getInt8PtrTy(B.getContext())->getPointerTo(257)
+      );   
+      StringRef AsmRead = "subq $$0x8, %fs:0x28\n\t";// this stack grows up
+      StringRef ConRead = "";
+      FunctionType* FtRead = FunctionType::get(Type::getVoidTy(Context),{}, false);
+      InlineAsm* Read = InlineAsm::get(FtRead, AsmRead, ConRead, true, false, InlineAsm::AD_ATT);
+      B.CreateCall(Read);
   
+
+
+	/*直接获取返回地址会被优化掉. */
+	/*通过获取栈帧FrameAddr（%rbp）来得到返回地址, 实验表明返回地址都存储在0x8（%rbp）*/
+
+      Type *Int64Ty = Type::getInt64Ty(Context);      
+      Type *Int8PtrPtrTy = Type::getInt8PtrTy(Context)->getPointerTo();
+	
+      Value *FrameAddr = B.CreateCall(Intrinsic::getDeclaration(M, Intrinsic::frameaddress), B.getInt32(0), "FrameAddr");
+      Value *offset = B.getInt64(0x8);
+      Value *tmp = B.CreatePtrToInt(FrameAddr, Int64Ty);
+      Value *tmp2 = B.CreateAdd(offset, tmp);
+      Value *RetAddrAddr = B.CreateIntToPtr(tmp2, Int8PtrPtrTy);      
+      Value *RetAddr = B.CreateLoad(RetAddrAddr);
+
+      Value* loadedStackPointer = B.CreateLoad(StackPointer, true, "");
+      Value *loadedStackPointer22 = B.CreateBitCast(loadedStackPointer, Int8PtrPtrTy);
+      Value *RightAddr = B.CreateLoad(loadedStackPointer22, true, "");      
+      Value *Cmp = B.CreateICmpEQ(RightAddr, RetAddr);
+
+   
       auto SuccessProb =
           BranchProbabilityInfo::getBranchProbStackProtector(true);
       auto FailureProb =

@@ -531,17 +531,7 @@ BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   // Mark the floating point stack registers as reserved.
   for (unsigned n = 0; n != 8; ++n)
     Reserved.set(X86::ST0 + n);
-  // Mark r13~r15 for Shadow stack
-  Reserved.set(X86::R15) ;
-  Reserved.set(X86::R15B) ;
-  Reserved.set(X86::R15W) ;
-  Reserved.set(X86::R15D) ;
-  // Mark XMM13~XMM15 for zipper stack
-  for (unsigned n = 13; n != 16; ++n) {
-    //for (MCRegAliasIterator AI(X86::XMM0 + n, this, true); AI.isValid(); ++AI)
-      //Reserved.set(*AI);
-  }
-//
+
   // Reserve the registers that only exist in 64-bit mode.
   if (!Is64Bit) {
     // These 8-bit registers are part of the x86-64 extension even though their
