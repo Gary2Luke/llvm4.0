@@ -478,7 +478,7 @@ bool StackProtector::InsertStackProtectors() {
 
 	/*直接获取返回地址会被优化掉. */
 	/*通过获取栈帧FrameAddr（%rbp）来得到返回地址, 实验表明返回地址都存储在0x8（%rbp）*/
-
+	/*O0下400、403过不去，O1下400、403、464过不去*/
       Type *Int64Ty = Type::getInt64Ty(Context);      
       Type *Int8PtrPtrTy = Type::getInt8PtrTy(Context)->getPointerTo();
 	
